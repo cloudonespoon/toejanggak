@@ -1,0 +1,92 @@
+# 퇴장각 데이터 자동 갱신
+# - 매주 월요일 새벽 3시(한국 시간)에 문화공공데이터광장 API에서 입출차·공연 데이터를 이어받아 분석하고,
+#   검사를 통과하면 data.js만 바꿔 GitHub Pages에 자동 반영합니다.
+# - 받다가 실패하거나 검사에서 떨어지면 기존 data.js를 그대로 두므로 서비스는 멈추지 않습니다.
+#   (실패하면 GitHub가 저장소 관리자에게 메일로 알려 줍니다.)
+# - 필요한 설정: 저장소 Settings → Secrets and variables → Actions 에 KCISA_API_KEY, KCISA_PARKING_KEY 등록
+name: 데이터 자동 갱신
+
+on:
+  schedule:
+    - cron: "0 18 * * 0"   # UTC 일요일 18:00 = 한국 월요일 03:00 (API 서버가 한가한 새벽)
+  workflow_dispatch:        # Actions 탭에서 수동 실행도 가능
+
+permissions:
+  contents: write
+
+concurrency: data-update
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    env:
+      TZ: Asia/Seoul
+      TJ_DATA: pipeline/data
+      TJ_SITE: .
+      TJ_REPORT: pipeline/out
+      KCISA_API_KEY: ${{ secrets.KCISA_API_KEY }}
+      KCISA_PARKING_KEY: ${{ secrets.KCISA_PARKING_KEY }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 패키지 설치
+        run: pip install -r pipeline/requirements.txt
+
+      - name: 지난번에 받은 원본 기록 불러오기 (캐시)
+        uses: actions/cache/restore@v4
+        with:
+          path: pipeline/data
+          key: raw-${{ github.run_id }}
+          restore-keys: raw-
+
+      - name: 캐시가 없으면 릴리스의 원본 백업(raw-data.zip)에서 시작
+        if: hashFiles('pipeline/data/linked_raw.json') == ''
+        continue-on-error: true
+        run: |
+          gh release download data-seed --pattern raw-data.zip --dir /tmp
+          mkdir -p pipeline/data && unzip -q -o /tmp/raw-data.zip -d pipeline/data
+
+      - name: 공연 연계 데이터 받기
+        continue-on-error: true
+        run: python -u pipeline/collect.py linked
+
+      - name: 입출차 기록 이어받기 (이미 받은 쪽은 건너뜀, 최대 4시간)
+        run: |
+          export DEADLINE="$(date -d '+4 hours' '+%Y-%m-%d %H:%M')"
+          python -u pipeline/download_pages.py 1 242 10000 || true
+
+      - name: 받은 원본 기록 저장 (다음 실행에서 이어받기)
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: pipeline/data
+          key: raw-${{ github.run_id }}
+
+      - name: 분석
+        run: |
+          cp data.js /tmp/data.old.js
+          python -u pipeline/analyze.py
+
+      - name: 검사 (실패하면 이전 data.js 유지)
+        run: |
+          if ! python pipeline/validate.py data.js /tmp/data.old.js; then
+            cp /tmp/data.old.js data.js
+            exit 1
+          fi
+
+      - name: 바뀐 데이터만 반영
+        run: |
+          if python pipeline/validate.py --same data.js /tmp/data.old.js; then
+            echo "데이터 변경 없음"; cp /tmp/data.old.js data.js; exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data.js
+          git commit -m "데이터 자동 갱신 $(date '+%Y-%m-%d')"
+          git push
