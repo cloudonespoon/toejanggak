@@ -8,7 +8,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@400;500;600;700;800&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="style.css?v=2">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%232a78d6'/%3E%3Cpath d='M9 16h11m0 0-4-4m4 4-4 4' stroke='white' stroke-width='3' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
 </head>
 <body>
@@ -24,21 +24,57 @@
 <main class="wrap">
   <section class="hero">
     <h1>공연 끝나고, 지금 나가면 막힐 각?</h1>
-    <p>올림픽공원 주차장 차량 <b id="heroRecords">-</b>건의 실제 입출차 기록으로, 공연이 끝난 뒤 <b>언제</b>, <b>어느 출구로</b> 나가야 덜 막히는지 알려드려요.</p>
+    <p>공연이 끝난 <b>지금</b>, 몇 시에 <b>어느 출구로</b> 나가야 덜 막히는지 알려드려요. 올림픽공원 주차장 차량 <b id="heroRecords">-</b>건의 실제 입출차 기록으로 계산해요.</p>
   </section>
 
   <nav class="tabs" role="tablist" aria-label="메뉴">
-    <button class="tab" role="tab" id="tab-find" aria-controls="panel-find" aria-selected="true">2025 공연 찾기</button>
-    <button class="tab" role="tab" id="tab-predict" aria-controls="panel-predict" aria-selected="false" tabindex="-1">공연 예정 예측</button>
-    <button class="tab" role="tab" id="tab-insight" aria-controls="panel-insight" aria-selected="false" tabindex="-1">데이터로 본 퇴장 러시</button>
-    <button class="tab" role="tab" id="tab-about" aria-controls="panel-about" aria-selected="false" tabindex="-1">서비스 안내</button>
+    <button class="tab" role="tab" id="tab-now" aria-controls="panel-now" aria-selected="true">지금 퇴장</button>
+    <button class="tab" role="tab" id="tab-find" aria-controls="panel-find" aria-selected="false" tabindex="-1">2025 기록</button>
+    <button class="tab" role="tab" id="tab-insight" aria-controls="panel-insight" aria-selected="false" tabindex="-1">데이터 분석</button>
+    <button class="tab" role="tab" id="tab-about" aria-controls="panel-about" aria-selected="false" tabindex="-1">안내</button>
   </nav>
 
-  <!-- 1. 공연 찾기 -->
-  <section class="panel" id="panel-find" role="tabpanel" aria-labelledby="tab-find">
+  <!-- 1. 지금 퇴장 가이드 (실시간) -->
+  <section class="panel" id="panel-now" role="tabpanel" aria-labelledby="tab-now">
+    <div class="card">
+      <h2>공연이 끝났나요?</h2>
+      <p class="sub">공연 규모와 종료 시각을 알려 주면, 2025년 비슷한 공연들의 실제 퇴장 기록에 지금 시각을 맞춰 주차장 상황과 나갈 출구·시각을 알려드려요. 결과는 30초마다 저절로 바뀌어요.</p>
+      <div class="form">
+        <div class="field">
+          <label for="pSize">공연 규모 (그날 공원 전체 관람객)</label>
+          <select id="pSize">
+            <option value="0">5천 명 미만 (핸드볼경기장·홀 공연 등)</option>
+            <option value="1">5천~1만 명</option>
+            <option value="2" selected>1만~1만 5천 명</option>
+            <option value="3">1만 5천 명 이상 (KSPO DOME 대형 콘서트)</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="pEnd">공연 종료 시각</label>
+          <input id="pEnd" type="time" value="21:00" step="60">
+        </div>
+        <div class="field">
+          <span class="lbl" id="pDayLbl">요일</span>
+          <div class="seg" id="pDay" role="group" aria-labelledby="pDayLbl">
+            <button type="button" data-v="weekday" aria-pressed="false">평일</button>
+            <button type="button" data-v="weekend" aria-pressed="true">주말</button>
+          </div>
+        </div>
+      </div>
+      <div class="btn-row">
+        <button class="btn" id="pNow" type="button">방금 끝났어요</button>
+        <button class="btn ghost" id="pRun" type="button">입력한 시각으로 보기</button>
+      </div>
+    </div>
+    <div id="live" aria-live="polite"></div>
+    <div id="pResult"></div>
+  </section>
+
+  <!-- 2. 공연 기록 -->
+  <section class="panel" id="panel-find" role="tabpanel" aria-labelledby="tab-find" hidden>
     <div class="card">
       <h2>2025년 공연 다시 보기</h2>
-      <p class="sub">공연을 고르면 그날 실제로 출구별 출차가 언제 몰렸는지 보여드려요.</p>
+      <p class="sub">‘지금 퇴장’ 안내의 근거가 된 실제 기록이에요. 공연을 고르면 그날 출구별 출차가 언제 몰렸는지 보여드려요.</p>
       <div class="search"><input id="q" type="search" placeholder="공연명이나 날짜로 검색 (예: DAY6, 07-19)" aria-label="공연 검색"></div>
       <div class="filters" id="sizeFilter" role="group" aria-label="관람객 규모">
         <button class="chip" data-size="all" aria-pressed="true">전체</button>
@@ -50,38 +86,6 @@
       <p class="muted" id="listCount"></p>
     </div>
     <div id="result"></div>
-  </section>
-
-  <!-- 2. 예측 -->
-  <section class="panel" id="panel-predict" role="tabpanel" aria-labelledby="tab-predict" hidden>
-    <div class="card">
-      <h2>보러 갈 공연이 있다면</h2>
-      <p class="sub">공연 종료 예정 시각과 규모를 넣으면, 2025년 비슷한 규모 공연들의 실제 퇴장 패턴으로 예측해 드려요.</p>
-      <div class="form">
-        <div class="field">
-          <label for="pEnd">공연 종료 예정 시각</label>
-          <input id="pEnd" type="time" value="21:00" step="300">
-        </div>
-        <div class="field">
-          <label for="pSize">공연 규모 (그날 공원 전체 관람객)</label>
-          <select id="pSize">
-            <option value="0">5천 명 미만 (핸드볼경기장·홀 공연 등)</option>
-            <option value="1">5천~1만 명</option>
-            <option value="2" selected>1만~1만 5천 명</option>
-            <option value="3">1만 5천 명 이상 (KSPO DOME 대형 콘서트)</option>
-          </select>
-        </div>
-        <div class="field">
-          <label>요일</label>
-          <div class="seg" id="pDay" role="group" aria-label="요일">
-            <button type="button" data-v="weekday" aria-pressed="false">평일</button>
-            <button type="button" data-v="weekend" aria-pressed="true">주말</button>
-          </div>
-        </div>
-      </div>
-      <button class="btn" id="pRun" type="button">퇴장각 보기</button>
-    </div>
-    <div id="pResult"></div>
   </section>
 
   <!-- 3. 인사이트 -->
@@ -115,6 +119,7 @@
         <li><b>올림픽공원 2025 차량입출차·공연·날씨정보 연계 데이터</b>에서 공연이 있었던 날과 시간대, 관람객 수를 가져왔어요.</li>
         <li>공연 날 출차가 갑자기 늘기 시작한 순간을 <b>'공연 종료(추정)'</b>로 잡았어요. 공연 데이터에는 종료 시각이 없어서, 차가 실제로 빠져나가기 시작한 시점을 기준으로 삼았어요.</li>
         <li>그 뒤 출구별로 출차가 얼마나 몰렸는지, 공연 전에 들어온 차가 종료 후 몇 분 만에 나갔는지 비교했어요.</li>
+        <li><b>'지금 퇴장'</b> 화면은 공연 종료 후 몇 분이 지났는지를 2025년 비슷한 규모·요일 공연들의 실제 퇴장 곡선에 맞춰, 지금이 피크인지·언제 한산해지는지·어느 출구가 빠른지 알려줘요. 실시간 주차장 출차 데이터는 아직 공개되지 않아 과거 패턴으로 안내하며, 공개되면 바로 연결할 수 있게 만들었어요.</li>
       </ol>
       <h3>꼭 알아두세요</h3>
       <ul class="sub" style="padding-left:18px">
@@ -136,7 +141,7 @@
   </footer>
 </main>
 
-<script src="data.js"></script>
-<script src="app.js"></script>
+<script src="data.js?v=2"></script>
+<script src="app.js?v=2"></script>
 </body>
 </html>
