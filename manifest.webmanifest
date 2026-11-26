@@ -1,0 +1,15 @@
+{
+  "name": "퇴장각 - 올림픽공원 공연 퇴장 가이드",
+  "short_name": "퇴장각",
+  "description": "올림픽공원 공연이 끝난 뒤 언제, 어느 출구로 나가야 덜 막히는지 알려주는 서비스",
+  "lang": "ko",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#ffffff",
+  "theme_color": "#2a78d6",
+  "icons": [
+    { "src": "icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any maskable" },
+    { "src": "icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable" }
+  ]
+}

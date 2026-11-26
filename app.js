@@ -20,6 +20,8 @@
 
   // ---------- 테마 ----------
   try { const t = localStorage.getItem("theme"); if (t) document.documentElement.dataset.theme = t; } catch (e) { /* ignore */ }
+  const qTheme = new URLSearchParams(location.search).get("theme"); // ?theme=light|dark (캡처·안내판 링크용)
+  if (qTheme === "light" || qTheme === "dark") document.documentElement.dataset.theme = qTheme;
   $("#themeBtn").addEventListener("click", () => {
     const cur = document.documentElement.dataset.theme || (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
     const next = cur === "dark" ? "light" : "dark";
@@ -191,6 +193,45 @@
     return cand.reduce((a, b) => (wait[a].median <= wait[b].median ? a : b));
   }
 
+  // ---------- 분산 안내 (analyze.py split_plan과 같은 규칙) ----------
+  // 모두에게 한 출구만 알려주면 그 출구가 다시 막히므로, 가장 빠른 출구와 5분 이내로 비슷한 출구끼리
+  // '가장 느린 출구 대비 아끼는 시간'에 비례해 이용자를 나눠 배정한다.
+  const SPLIT_WITHIN = 5;
+  function splitPlan(waits) {
+    const w = Object.fromEntries(Object.entries(waits).filter(([, v]) => v != null));
+    const vals = Object.values(w);
+    if (!vals.length) return {};
+    const best = Math.min(...vals), worst = Math.max(...vals);
+    const cand = Object.keys(w).filter((g) => w[g] <= best + SPLIT_WITHIN);
+    const fastest = cand.reduce((a, b) => (w[a] <= w[b] ? a : b));
+    if (cand.length === 1 || worst === best) return { [fastest]: 1 };
+    const gain = Object.fromEntries(cand.map((g) => [g, worst - w[g]]));
+    const s = Object.values(gain).reduce((a, b) => a + b, 0);
+    if (s <= 0) return { [fastest]: 1 };
+    return Object.fromEntries(cand.filter((g) => gain[g] > 0).map((g) => [g, gain[g] / s]));
+  }
+  function userDraw() {
+    // 이용자마다 고정된 난수 (새로고침해도 같은 출구가 배정되도록)
+    let u = NaN;
+    try { u = Number(sessionStorage.getItem("tj_u")); } catch (e) { /* ignore */ }
+    if (!(u >= 0 && u < 1)) {
+      u = Math.random();
+      try { sessionStorage.setItem("tj_u", String(u)); } catch (e) { /* ignore */ }
+    }
+    return u;
+  }
+  function pickFromPlan(plan) {
+    const gs = Object.keys(plan).sort((a, b) => plan[b] - plan[a]);
+    if (!gs.length) return null;
+    const u = userDraw();
+    let acc = 0;
+    for (const g of gs) { acc += plan[g]; if (u < acc) return g; }
+    return gs[gs.length - 1];
+  }
+  const planText = (plan) => Object.keys(plan).sort((a, b) => plan[b] - plan[a]).map((g) => `${g} ${Math.round(plan[g] * 100)}%`).join(" · ");
+  // 결과 화면에서 쓰는 출구별 '종료 후 출차 시간' (예측: 들어온 문 기준이 있으면 그것, 실제 기록: 그날 값)
+  const waitMap = (r) => r.ewait || Object.fromEntries(GATES.map((g) => [g, r.wait[g] && r.wait[g].median != null ? r.wait[g].median : null]));
+
   function renderResult(host, r, mode) {
     // r: {title, dateText, t0, curve:{total, 동2문..}, curveStart, t80, calm, excess, peak5, gates:{g:{share}}, wait:{g:{median}}, aud}
     const i0 = 12; // 곡선에서 t0 위치 (60분/5분)
@@ -198,13 +239,16 @@
     let pk = i0; for (let i = i0; i < totals.length; i++) if (totals[i] > totals[pk]) pk = i;
     const peakTime = addMin(r.t0, (pk - i0) * 5);
     const calmTime = addMin(r.t0, r.calm);
-    const best = bestGate(r.wait, r.gates);
+    const best = r.pick || bestGate(r.wait, r.gates);
+    const W = waitMap(r);
     const worst = GATES.reduce((a, b) => (r.gates[a].share >= r.gates[b].share ? a : b));
-    const others = GATES.filter((g) => g !== best && r.wait[g] && r.wait[g].median != null);
-    const avgOther = others.length ? others.reduce((s, g) => s + r.wait[g].median, 0) / others.length : null;
-    const gain = best && avgOther != null ? Math.max(0, Math.round(avgOther - r.wait[best].median)) : null;
+    const others = GATES.filter((g) => g !== best && W[g] != null);
+    const avgOther = others.length ? others.reduce((s, g) => s + W[g], 0) / others.length : null;
+    const gain = best && W[best] != null && avgOther != null ? Math.max(0, Math.round(avgOther - W[best])) : null;
     const labels = totals.map((_, i) => addMin(r.curveStart, i * 5));
     const isPred = mode === "predict";
+    const multi = isPred && r.plan && Object.keys(r.plan).length > 1;
+    const who = isPred && r.entry ? `${r.entry}으로 들어온 차가 ` : "";
 
     host.innerHTML = `
       <div class="card" aria-live="polite">
@@ -212,8 +256,9 @@
           <div class="eyebrow">${isPred ? "예측 결과" : "실제 기록"} · ${esc(r.dateText)}</div>
           <h2 style="margin:0">${esc(r.title)}</h2>
           ${r.names && r.names.length > 1 ? `<p class="muted" style="margin:0">같은 날 공원 안 공연: ${r.names.map(esc).join(" · ")}</p>` : ""}
-          ${best ? `<div class="big"><span class="key" style="background:var(${GVAR[best]})"></span>${best} 출구로 나가세요</div>
-          <p>${isPred ? "비슷한 규모 공연에서" : "이날"} ${best} 출구 이용 차량은 공연이 끝나고 보통 <b>${r.wait[best].median}분</b> 만에 빠져나갔어요${gain ? ` (다른 출구보다 평균 <b>${gain}분</b> 빠름)` : ""}.</p>` : ""}
+          ${best && W[best] != null ? `<div class="big"><span class="key" style="background:var(${GVAR[best]})"></span>${best} 출구로 나가세요</div>
+          <p>${isPred ? "비슷한 규모 공연에서" : "이날"} ${who}${best} 출구로 나가면 공연이 끝나고 보통 <b>${W[best]}분</b> 만에 빠져나갔어요${gain ? ` (다른 출구보다 평균 <b>${gain}분</b> 빠름)` : ""}.</p>
+          ${multi ? `<p class="split-note">한 출구로만 안내하면 그 출구가 다시 막혀서, 걸린 시간이 비슷한 출구끼리 이용자를 나눠 안내해요 (<b>${planText(r.plan)}</b>). 이 화면에는 ${best} 출구가 배정됐어요.</p>` : ""}` : ""}
         </div>
         <div class="timeline" aria-label="퇴장 타임라인">
           <div class="step on"><div class="t">${r.t0}</div><div class="c">공연 종료${isPred ? "" : "(추정)"}</div></div>
@@ -238,13 +283,13 @@
       </div>
       <div class="card">
         <h3>출구별 비교</h3>
-        <p class="sub">공연 종료 후 출차까지 걸린 시간 (중앙값, 공연 전에 들어온 차 기준) · 막대 옆 괄호는 출차 비율</p>
+        <p class="sub">공연 종료 후 출차까지 걸린 시간 (중앙값, ${isPred && r.entry ? `${r.entry}으로 들어온 차 기준` : "공연 전에 들어온 차 기준"}) · 막대 옆 괄호는 출차 비율</p>
         <div class="gate-bars">${gateBars(r)}</div>
       </div>
       <div class="card">
         <h3>이렇게 해보세요</h3>
         <ul class="advice">
-          ${best ? `<li><span class="ic">1</span><span><b>${best} 출구</b>를 노리세요. 동2문·남2문·북2문 주차장은 안에서 이어져 있어 들어온 문과 다른 문으로도 나갈 수 있어요.</span></li>` : ""}
+          ${best ? `<li><span class="ic">1</span><span><b>${best} 출구</b>를 노리세요. 동2문·남2문·북2문 주차장은 안에서 이어져 있어 들어온 문과 다른 문으로도 나갈 수 있어요. 가려는 방향과 출구가 반대라면 바깥 도로에서 돌아가는 시간도 생각해 주세요.</span></li>` : ""}
           <li><span class="ic">2</span><span><b>${peakTime} 전후</b>가 가장 막혀요. 급하지 않다면 <b>${calmTime} 이후</b>에 출발하면 훨씬 덜 기다려요.</span></li>
           <li><span class="ic">3</span><span>기다리는 동안 굿즈 정리나 근처 식사로 시간을 보내보세요. ${r.t80}분 정도면 차량 80%가 빠져나가요.</span></li>
           <li><span class="ic">4</span><span>차 없이 왔다면: 올림픽공원역(5·9호선), 몽촌토성역(8호선), 한성백제역(9호선)으로 흩어서 이동하면 덜 붐벼요.</span></li>
@@ -274,16 +319,18 @@
   }
 
   function gateBars(r) {
-    const vals = GATES.map((g) => (r.wait[g] && r.wait[g].median != null ? r.wait[g].median : null));
+    const W = waitMap(r);
+    const vals = GATES.map((g) => W[g]);
     const mx = Math.max(1, ...vals.filter((v) => v != null));
-    const best = bestGate(r.wait, r.gates);
+    const best = r.pick || bestGate(r.wait, r.gates);
+    const shareOf = (g) => Math.round(((r.eshare && r.eshare[g] != null) ? r.eshare[g] : r.gates[g].share) * 100);
     return GATES.map((g, i) => {
       const v = vals[i];
       const w = v == null ? 0 : Math.max(2, (v / mx) * 100);
-      return `<div class="gbar ${g === best ? "best" : ""}" title="${g}: ${v ?? "-"}분, 출차 비율 ${Math.round(r.gates[g].share * 100)}%">
+      return `<div class="gbar ${g === best ? "best" : ""}" title="${g}: ${v ?? "-"}분, 출차 비율 ${shareOf(g)}%">
         <span class="name"><i style="background:var(${GVAR[g]})"></i>${g}</span>
         <span class="track"><span class="fill" style="display:block;width:${w}%;background:var(${GVAR[g]})"></span></span>
-        <span class="val">${v == null ? "-" : v + "분"} <span class="muted">(${Math.round(r.gates[g].share * 100)}%)</span></span>
+        <span class="val">${v == null ? "-" : v + "분"} <span class="muted">(${shareOf(g)}%)</span></span>
       </div>`;
     }).join("");
   }
@@ -339,6 +386,12 @@
     document.querySelectorAll("#pDay button").forEach((x) => x.setAttribute("aria-pressed", x.dataset.v === v));
   }
   document.querySelectorAll("#pDay button").forEach((b) => b.addEventListener("click", () => { setDay(b.dataset.v); if (lastPred) runGuide(false); }));
+  let pEntry = "";
+  function setEntry(v) {
+    pEntry = v;
+    document.querySelectorAll("#pEntry button").forEach((x) => x.setAttribute("aria-pressed", x.dataset.v === v));
+  }
+  document.querySelectorAll("#pEntry button").forEach((b) => b.addEventListener("click", () => { setEntry(b.dataset.v); if (lastPred) runGuide(false); }));
   $("#pSize").addEventListener("change", () => { if (lastPred) runGuide(false); });
   function endFromInput() {
     const [h, m] = ($("#pEnd").value || "21:00").split(":").map(Number);
@@ -377,19 +430,21 @@
     const i0 = 12, totals = r.curve.total;
     let pk = i0; for (let i = i0; i < totals.length; i++) if (totals[i] > totals[pk]) pk = i;
     const peakMin = (pk - i0) * 5, calm = r.calm;
-    const best = bestGate(r.wait, r.gates);
+    const best = r.pick || bestGate(r.wait, r.gates);
+    const multi = r.plan && Object.keys(r.plan).length > 1;
+    const err = MODEL.backtest && MODEL.backtest.calm_mae ? Math.round(MODEL.backtest.calm_mae) : null;
     const at = (min) => hhmm(new Date(endAt.getTime() + min * 60000));
     const bestTxt = best ? `${best} 출구` : "덜 붐비는 출구";
     let badge, state, sub, prog = null;
     if (e < 0) {
       badge = "공연 중";
       state = `공연 종료까지 ${fmtDur(-e)}`;
-      sub = `끝나면 ${at(peakMin)}쯤 가장 몰리고, ${at(calm)}부터 한산해져요. 미리 ${bestTxt} 쪽으로 나갈 동선을 생각해 두세요.`;
+      sub = `끝나면 ${at(peakMin)}쯤 가장 몰리고, ${at(calm)}쯤부터 한산해져요. 미리 ${bestTxt} 쪽으로 나갈 동선을 생각해 두세요.`;
     } else if (e < calm) {
       const rush = e < peakMin + 10;
       badge = rush ? "가장 붐빔" : "붐빔";
       state = rush ? "지금 나가면 막혀요" : "아직 붐벼요";
-      sub = `${at(calm)}(약 ${fmtDur(calm - e)} 뒤)부터 한산해져요. 지금 출발해야 한다면 ${bestTxt}로 나가세요.`;
+      sub = `${at(calm)}쯤(약 ${fmtDur(calm - e)} 뒤)부터 한산해져요. 지금 출발해야 한다면 ${bestTxt}로 나가세요.`;
       prog = e / calm;
     } else if (e < 150) {
       badge = "한산";
@@ -408,14 +463,14 @@
     r.nowIdx = inCurve ? idx : null;
     $("#live").innerHTML = `
       <div class="card live">
-        <div class="clock">지금 ${hhmm(now)} 기준 · 공연 종료 ${hhmm(endAt)} · 30초마다 갱신</div>
+        <div class="clock">지금 ${hhmm(now)} 기준 · 공연 종료 ${hhmm(endAt)} · 30초마다 갱신${navigator.onLine === false ? " · 오프라인(저장된 데이터로 안내 중)" : ""}</div>
         <div class="state"><span class="badge">${badge}</span>${esc(state)}<small>${esc(sub)}</small></div>
         ${prog != null ? `<div class="bar" role="img" aria-label="한산해질 때까지 진행률 ${Math.round(prog * 100)}%"><span style="width:${(prog * 100).toFixed(1)}%"></span></div>
         <div class="bar-l"><span>종료 ${hhmm(endAt)}</span><span>피크 ${at(peakMin)}</span><span>한산 ${at(calm)}</span></div>` : ""}
         <div class="tiles now-tiles">
           <div class="tile"><div class="l">지금 5분 동안 나가는 차 (예상)</div><div class="v">${curNow != null ? nf(curNow) + "대" : "-"}</div><div class="s">${curNow != null ? `가장 붐빌 때의 ${Math.round((curNow / peakV) * 100)}%` : "그래프 범위 밖"}</div></div>
-          <div class="tile"><div class="l">추천 출구</div><div class="v">${best || "-"}</div><div class="s">종료 후 출차가 가장 빨랐던 출구</div></div>
-          <div class="tile"><div class="l">한산해지는 시각</div><div class="v">${at(calm)}</div><div class="s">${e < calm ? `약 ${fmtDur(calm - e)} 뒤` : "이미 지났어요"}</div></div>
+          <div class="tile"><div class="l">${multi ? "나에게 배정된 출구" : "추천 출구"}</div><div class="v">${best || "-"}</div><div class="s">${multi ? `쏠림 방지 분산 안내: ${planText(r.plan)}` : r.entry ? `${r.entry}으로 들어온 차가 가장 빨리 나간 출구` : "종료 후 출차가 가장 빨랐던 출구"}</div></div>
+          <div class="tile"><div class="l">한산해지는 시각</div><div class="v">${at(calm)}쯤</div><div class="s">${e < calm ? `약 ${fmtDur(calm - e)} 뒤` : "이미 지났어요"}${err ? ` · 보통 ±${err}분 오차` : ""}</div></div>
         </div>
         <p class="muted" style="margin:10px 0 0">실시간 주차 데이터가 아직 공개되지 않아, 2025년 비슷한 규모·요일 공연 ${r.poolN}회의 실제 퇴장 기록에 지금 시각을 맞춰 안내해요.</p>
       </div>`;
@@ -442,12 +497,26 @@
       const ws = pool.map((s) => s.wait[g].median).filter((v) => v != null);
       wait[g] = { median: ws.length ? Math.round(med(ws) * 10) / 10 : null, n: ws.length >= 3 ? 999 : 0 };
     });
+    // 들어온 문을 골랐으면 그 문으로 들어온 차들의 출구별 기록으로 추천 (공연 3회 이상 있는 출구만)
+    let ewait = null, eshare = null;
+    if (pEntry) {
+      ewait = {}; eshare = {};
+      GATES.forEach((og) => {
+        const rows = pool.filter((s) => s.entry && s.entry[pEntry]).map((s) => s.entry[pEntry].out[og]);
+        const ws = rows.filter((o) => o && o.median != null).map((o) => o.median);
+        ewait[og] = ws.length >= 3 ? med(ws) : null;
+        eshare[og] = rows.length ? med(rows.map((o) => (o ? o.share : 0))) : null;
+      });
+      if (!Object.values(ewait).some((v) => v != null)) { ewait = null; eshare = null; }
+    }
+    const plan = splitPlan(ewait || Object.fromEntries(GATES.map((g) => [g, wait[g].n ? wait[g].median : null])));
     const labelSize = $("#pSize").selectedOptions[0].textContent.replace(/\s*\(.*\)/, "");
     lastPred = {
-      title: `관람객 ${labelSize} 공연 (${pDay === "weekend" ? "주말" : "평일"})`,
+      title: `관람객 ${labelSize} 공연 (${pDay === "weekend" ? "주말" : "평일"})${pEntry ? ` · ${pEntry}으로 들어옴` : ""}`,
       dateText: `2025년 비슷한 공연 ${pool.length}회 기준`,
       t0: end, curve, curveStart: addMin(end, -60), t80: med(pool.map((s) => s.t80)), calm: med(pool.map((s) => s.calm_after)),
       excess, peak5: sh.peak5, gates, wait, poolN: pool.length,
+      entry: ewait ? pEntry : "", ewait, eshare, plan, pick: pickFromPlan(plan),
     };
     renderResult($("#pResult"), lastPred, "predict");
   }
@@ -484,6 +553,45 @@
       ["들어온 문과 다른 문으로 나간 차", Math.round((INSIGHT.cross_exit_ratio || 0) * 100) + "%"],
     ];
     $("#kpis").innerHTML = k.map(([l, v]) => `<div class="tile"><div class="l">${l}</div><div class="v">${v}</div></div>`).join("");
+    renderAccuracy();
+    renderOps();
+  }
+
+  function renderAccuracy() {
+    const b = MODEL.backtest;
+    if (!b) return;
+    const pct = (v) => Math.round(v * 100) + "%";
+    const t = [
+      ["추천 출구가 그날 실제로 가장 빨랐던 비율", pct(b.gate_hit), `가장 많이 몰린 출구는 ${pct(b.busiest_hit)}`],
+      ["추천 출구를 따랐다면", `${Math.round(b.save_median)}분 빨리`, `가장 붐빈 출구 대비 중앙값 · ${pct(b.save_pos)}의 날 이득`],
+      ["들어온 문별 분산 안내를 따랐다면", `${b.split_save_median}분 빨리`, `늘 쓰던 출구 대비 중앙값 · ${pct(b.split_save_pos)}의 경우 이득`],
+      ["가장 붐비는 시각 예측", `±10분 안 ${pct(b.peak_within10)}`, `오차 중앙값 ${Math.round(b.peak_mae)}분`],
+      ["한산해지는 시각 예측", `오차 ${Math.round(b.calm_mae)}분`, `±15분 안 ${pct(b.calm_within15)} · 그래서 ‘~쯤’으로 안내`],
+      ["안내 시각에 출발했을 때 실제 출차량", `피크의 ${pct(b.level_median)}`, "중앙값"],
+    ];
+    $("#accuracy").innerHTML = t.map(([l, v, s]) => `<div class="tile"><div class="l">${l}</div><div class="v">${v}</div><div class="s">${s}</div></div>`).join("");
+    $("#accNote").textContent = `2025년 공연일 ${b.n}일 기준. 출구 추천은 정확도가 높아 핵심 기능으로 두고, 한산 시각은 공연마다 편차가 커서 대략적인 시각으로 안내해요.`;
+  }
+
+  function renderOps() {
+    const ops = MODEL.ops || [];
+    if (!ops.length) return;
+    const sizeName = (o) => ["5천 명 미만", "5천~1만 명", "1만~1만 5천 명", "1만 5천 명 이상"][o.bucket] || "";
+    const rows = ops.slice().sort((a, b) => b.lo - a.lo || (b.weekend - a.weekend)).map((o) => {
+      const busiest = GATES.reduce((a, b) => (o.share[a] >= o.share[b] ? a : b));
+      const ws = GATES.filter((g) => o.wait[g] != null);
+      const fastest = ws.length ? ws.reduce((a, b) => (o.wait[a] <= o.wait[b] ? a : b)) : null;
+      const slow = ws.length ? ws.reduce((a, b) => (o.wait[a] >= o.wait[b] ? a : b)) : null;
+      const rec = fastest && slow && fastest !== busiest
+        ? `종료 후 0~${o.peak_after + 15}분 ${busiest} 안내요원 집중, ${fastest} 출구로 우회 안내`
+        : `종료 후 0~${o.peak_after + 15}분 ${busiest} 안내요원 집중`;
+      return `<tr><td>${sizeName(o)} · ${o.weekend ? "주말" : "평일"}<div class="muted">${o.n}일</div></td>
+        <td>${nf(o.excess)}대</td><td>${o.peak_after}분</td><td>${o.calm}분</td>
+        <td>${busiest} ${Math.round(o.share[busiest] * 100)}%</td>
+        <td>${fastest ? `${fastest} ${o.wait[fastest]}분` : "-"}${slow && slow !== fastest ? `<div class="muted">${slow} ${o.wait[slow]}분</div>` : ""}</td>
+        <td>${rec}</td></tr>`;
+    }).join("");
+    $("#opsTable").innerHTML = `<thead><tr><th>공연 규모·요일</th><th>몰리는 차</th><th>피크</th><th>한산</th><th>가장 몰리는 출구</th><th>가장 빠른/느린 출구</th><th>운영 권고</th></tr></thead><tbody>${rows}</tbody>`;
   }
 
   function medianOf(arr) {
@@ -502,6 +610,18 @@
   matchMedia("(prefers-color-scheme: dark)").addEventListener?.("change", rerender);
 
   // ---------- 시작 ----------
+  // 오프라인 대비: 한 번 연 뒤에는 휴대폰에 저장돼 통신이 몰려도 동작 (sw.js)
+  if ("serviceWorker" in navigator && /^https?:/.test(location.protocol)) {
+    navigator.serviceWorker.register("sw.js").catch(() => { /* 지원 안 되면 그냥 온라인으로 동작 */ });
+  }
+  window.addEventListener("online", () => { if (lastPred) renderLive(); });
+  window.addEventListener("offline", () => { if (lastPred) renderLive(); });
+  if (!SHOWS.length || !(MODEL.shapes || []).length) {
+    // 데이터 파일을 못 읽었을 때: 화면이 깨지지 않게 안내만 띄움
+    $("#live").innerHTML = `<div class="card live"><div class="state"><span class="badge">알림</span>데이터를 불러오지 못했어요<small>잠시 후 새로고침해 주세요. 문제가 계속되면 현장 안내요원의 안내를 따라 주세요.</small></div></div>`;
+    return;
+  }
+  if (INSIGHT.updated) $("#updated").textContent = ` · 데이터 갱신 ${INSIGHT.updated}`;
   $("#heroRecords").textContent = nf(INSIGHT.records || 0);
   $("#crossPct").textContent = Math.round((INSIGHT.cross_exit_ratio || 0) * 100) + "%";
   // 기록 탭 기본 공연: 기록 60% 이상 확보 · 그날 공연 1개 · 저녁 종료 · 1만 명 이상 중 퇴장 러시가 가장 뚜렷한 날 (기획서 [그림 4]와 같은 규칙)
@@ -512,10 +632,31 @@
   renderList();
   // 첫 화면: 오늘 요일로 맞추고, 입력된 종료 시각 기준 안내를 바로 보여줌
   setDay(isWeekendDate(new Date()) ? "weekend" : "weekday");
-  endAt = endFromInput();
+  // 주소로 상태 지정 (주차장 문별 QR 포스터용): ?entry=남2문&size=3&end=now|21:30&ago=분
+  //  예) 남2문 주차장 QR → ?entry=남2문&end=now : 들어온 문이 자동 선택되고 '방금 끝났어요' 상태로 열림
+  const qs = new URLSearchParams(location.search);
+  if (GATES.includes(qs.get("entry"))) setEntry(qs.get("entry"));
+  if (/^[0-3]$/.test(qs.get("size") || "")) $("#pSize").value = qs.get("size");
+  if (qs.get("day") === "weekend" || qs.get("day") === "weekday") setDay(qs.get("day"));
+  const qEnd = qs.get("end");
+  if (qEnd === "now" || /^\d{1,2}:\d{2}$/.test(qEnd || "")) {
+    if (qEnd === "now") {
+      const n = new Date(Date.now() - (Number(qs.get("ago")) || 0) * 60000); n.setSeconds(0, 0);
+      $("#pEnd").value = hhmm(n);
+      if (!qs.get("day")) setDay(isWeekendDate(n) ? "weekend" : "weekday");
+      endAt = n;
+    } else {
+      $("#pEnd").value = qEnd.padStart(5, "0");
+    }
+  }
+  if (!endAt) endAt = endFromInput();
   predict();
   renderLive();
   const h0 = (location.hash || "").slice(1);
   const t = tabs.find((x) => x.id === "tab-" + (h0 === "predict" ? "now" : h0));
   if (t) selectTab(t);
+  // 상태를 주소로 열었으면 결과 위치로 스크롤 (focus=live|result|accuracy|opsTable, top이면 그대로)
+  const fq = qs.get("focus") || (qEnd ? "live" : "");
+  const fEl = fq && fq !== "top" ? document.getElementById(fq === "result" ? "pResult" : fq) : null;
+  if (fEl) requestAnimationFrame(() => fEl.scrollIntoView({ block: "start" }));
 })();
